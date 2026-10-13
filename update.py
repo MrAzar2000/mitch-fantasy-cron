@@ -115,9 +115,34 @@ for m in schedule:
         liveWeek = cur; break
 out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]]}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab}
 
-# push to Supabase
-body = json.dumps({"id": "current", "data": out}).encode("utf-8")
-req = urllib.request.Request(SB_URL + "/rest/v1/league_data?on_conflict=id", data=body, method="POST",
-    headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal"})
-with urllib.request.urlopen(req, timeout=90) as r:
-    print("Supabase upsert:", r.status, "| week:", cur, "| liveWeek:", liveWeek, "| finals:", finals, "| teams:", len(teams))
+# Only write when something actually changed (ignoring the timestamp itself), so an open
+# page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
+def _sig(obj):
+    o = json.loads(json.dumps(obj))
+    if isinstance(o.get("meta"), dict):
+        o["meta"].pop("lastUpdated", None)
+    return json.dumps(o, sort_keys=True)
+
+changed = True
+try:
+    greq = urllib.request.Request(SB_URL + "/rest/v1/league_data?id=eq.current&select=data",
+        headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY})
+    with urllib.request.urlopen(greq, timeout=90) as r:
+        rows = json.loads(r.read().decode("utf-8"))
+    if rows and _sig(rows[0].get("data", {})) == _sig(out):
+        changed = False
+        # keep the prior timestamp so "Updated X" reflects the last REAL change, not this poll
+        prev = (rows[0].get("data") or {}).get("meta", {}).get("lastUpdated")
+        if prev:
+            out["meta"]["lastUpdated"] = prev
+except Exception as e:
+    print("change-check failed, writing anyway:", e)
+
+if not changed:
+    print("No change since last pull — skipped write. | week:", cur, "| liveWeek:", liveWeek)
+else:
+    body = json.dumps({"id": "current", "data": out}).encode("utf-8")
+    req = urllib.request.Request(SB_URL + "/rest/v1/league_data?on_conflict=id", data=body, method="POST",
+        headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal"})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        print("Supabase upsert:", r.status, "| week:", cur, "| liveWeek:", liveWeek, "| finals:", finals, "| teams:", len(teams))
