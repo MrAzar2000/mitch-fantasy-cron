@@ -2,8 +2,14 @@ name: ESPN auto-pull
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
-  workflow_dispatch: {}       # lets you run it on demand from the Actions tab
+    # --- NFL game windows: check every ~5 min (times are UTC; ranges widened to cover both EDT & EST) ---
+    - cron: "*/5 0-5 * * 5"     # Thursday Night Football   (Fri 00:00-05:59 UTC)
+    - cron: "*/5 13-23 * * 0"   # Sunday slate, incl. early London games (Sun 13:00-23:59 UTC)
+    - cron: "*/5 0-5 * * 1"     # Sunday-night spillover     (Mon 00:00-05:59 UTC)
+    - cron: "*/5 0-5 * * 2"     # Monday Night Football      (Tue 00:00-05:59 UTC)
+    # --- Off-peak: once an hour for waiver/roster/trade changes (:17 dodges GitHub's top-of-hour load) ---
+    - cron: "17 * * * *"
+  workflow_dispatch: {}         # run on demand from the Actions tab
 
 concurrency:
   group: espn-pull
