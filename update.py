@@ -107,13 +107,29 @@ for t in d["teams"]:
     faab_teams.append({"teamId": t["id"], "spent": spent, "remaining": faab_budget - spent, "adds": tc.get("acquisitions", 0), "drops": tc.get("drops", 0), "pickups": picks})
 faab = {"budget": faab_budget, "usingFaab": acq.get('isUsingAcquisitionBudget', False), "teams": faab_teams}
 
+# NFL kickoff times (epoch ms) for the site's "next kickoff" countdown. Best-effort: the
+# site falls back to standard TNF/Sunday/MNF slots if this is missing.
+nfl_kickoffs = []
+try:
+    pro = fetch_json(f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{SEASON}?view=proTeamSchedules_wl")
+    seen = set()
+    for pt in (pro.get("settings") or {}).get("proTeams", []):
+        for games in (pt.get("proGamesByScoringPeriod") or {}).values():
+            for g in games:
+                if g.get("id") in seen or not g.get("date"): continue
+                seen.add(g.get("id"))
+                nfl_kickoffs.append(int(g["date"]))
+    nfl_kickoffs.sort()
+except Exception as e:
+    print("NFL schedule fetch failed (site uses fallback slots):", e)
+
 hist = json.load(open(HERE + "/history.json", encoding="utf-8"))
 finals = any(m["winner"] != "UNDECIDED" for m in schedule)
 liveWeek = None
 for m in schedule:
     if m["week"] == cur and m["winner"] == "UNDECIDED" and (m["homeLive"] > 0 or m["awayLive"] > 0):
         liveWeek = cur; break
-out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]]}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab}
+out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab}
 
 # Only write when something actually changed (ignoring the timestamp itself), so an open
 # page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
