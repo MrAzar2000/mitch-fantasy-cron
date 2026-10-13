@@ -1,0 +1,23 @@
+name: ESPN auto-pull
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes
+  workflow_dispatch: {}       # lets you run it on demand from the Actions tab
+
+concurrency:
+  group: espn-pull
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull ESPN and push to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          LEAGUE_ID: "848479247"
+          SEASON: "2026"
+        run: python3 update.py
