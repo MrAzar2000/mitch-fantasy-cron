@@ -1,6 +1,8 @@
 name: ESPN auto-pull
 
 on:
+  # Scheduled runs only fire from the default branch (main). If runs stop appearing in the
+  # Actions tab, a commit that touches this file re-registers the schedule.
   schedule:
     # --- NFL game windows: check every ~5 min (times are UTC; ranges widened to cover both EDT & EST) ---
     - cron: "*/5 0-5 * * 5"     # Thursday Night Football   (Fri 00:00-05:59 UTC)
