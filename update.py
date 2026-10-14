@@ -134,6 +134,25 @@ try:
 except Exception as e:
     warn(f"NFL schedule fetch failed (site uses fallback slots): {e}")
 
+# This week's NFL games for the matchup screen: opponent, stadium, indoor flag and ESPN's
+# forecast (AccuWeather, published a few days ahead). Best-effort: the site just shows no weather.
+nfl_games = {}
+try:
+    sbd = fetch_json(f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates={SEASON}&seasontype=2&week={cur}")
+    for ev in sbd.get("events", []):
+        c = (ev.get("competitions") or [{}])[0]
+        v, sides = c.get("venue") or {}, c.get("competitors") or []
+        wx = ev.get("weather") or c.get("weather") or {}
+        for t in sides:
+            ab = (t.get("team") or {}).get("abbreviation")
+            if not ab: continue
+            opp = next(((o.get("team") or {}).get("abbreviation") for o in sides if o is not t), None)
+            nfl_games[ab] = {"opp": opp, "home": t.get("homeAway") == "home", "venue": v.get("fullName"),
+                             "city": (v.get("address") or {}).get("city"), "indoor": bool(v.get("indoor")),
+                             "wx": wx.get("displayValue"), "temp": wx.get("temperature")}
+except Exception as e:
+    warn(f"NFL scoreboard fetch failed (no weather on the site): {e}")
+
 def sb_get_current():
     req = urllib.request.Request(SB_URL + "/rest/v1/league_data?id=eq.current&select=data",
         headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY})
@@ -206,7 +225,7 @@ liveWeek = None
 for m in schedule:
     if m["week"] == cur and m["winner"] == "UNDECIDED" and (m["homeLive"] > 0 or m["awayLive"] > 0):
         liveWeek = cur; break
-out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players}
+out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players}
 
 # Only write when something actually changed (ignoring the timestamp itself), so an open
 # page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
