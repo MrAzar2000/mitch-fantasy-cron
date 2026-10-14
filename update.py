@@ -15,9 +15,17 @@ def fetch_json(url, headers=None):
     with urllib.request.urlopen(req, timeout=90) as r:
         return json.loads(r.read().decode("utf-8"))
 
-ESPN = (f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{SEASON}/segments/0/leagues/{LEAGUE_ID}"
+def warn(msg):
+    # shows as a yellow annotation on the Actions run; the run still succeeds
+    print("::warning::" + msg)
+
+LEAGUE_BASE = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{SEASON}/segments/0/leagues/{LEAGUE_ID}"
+ESPN = (LEAGUE_BASE +
         "?view=mSettings&view=mTeam&view=mRoster&view=mMatchup&view=mMatchupScore&view=mStandings&view=mDraftDetail&view=mMembers&view=mSchedule")
 d = fetch_json(ESPN)
+# Fail the run (=> GitHub emails a failure notice) rather than write an empty league over good data.
+if not d.get("teams") or not d.get("schedule"):
+    raise SystemExit("ESPN returned no teams/schedule - not writing to Supabase")
 
 POS = {1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST'}
 LINEUP = {0:'QB',1:'TQB',2:'RB',3:'RB/WR',4:'WR',5:'WR/TE',6:'TE',7:'OP',16:'DST',17:'K',18:'P',19:'HC',20:'BE',21:'IR',23:'FLEX'}
@@ -109,11 +117,14 @@ faab = {"budget": faab_budget, "usingFaab": acq.get('isUsingAcquisitionBudget', 
 
 # NFL kickoff times (epoch ms) for the site's "next kickoff" countdown. Best-effort: the
 # site falls back to standard TNF/Sunday/MNF slots if this is missing.
-nfl_kickoffs = []
+nfl_kickoffs, pro_games = [], {}
 try:
     pro = fetch_json(f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{SEASON}?view=proTeamSchedules_wl")
     seen = set()
     for pt in (pro.get("settings") or {}).get("proTeams", []):
+        wk_games = (pt.get("proGamesByScoringPeriod") or {}).get(str(cur)) or []
+        if wk_games and wk_games[0].get("date"):
+            pro_games[PRO.get(pt.get("id"), str(pt.get("id")))] = int(wk_games[0]["date"])
         for games in (pt.get("proGamesByScoringPeriod") or {}).values():
             for g in games:
                 if g.get("id") in seen or not g.get("date"): continue
@@ -121,7 +132,73 @@ try:
                 nfl_kickoffs.append(int(g["date"]))
     nfl_kickoffs.sort()
 except Exception as e:
-    print("NFL schedule fetch failed (site uses fallback slots):", e)
+    warn(f"NFL schedule fetch failed (site uses fallback slots): {e}")
+
+def sb_get_current():
+    req = urllib.request.Request(SB_URL + "/rest/v1/league_data?id=eq.current&select=data",
+        headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        rows = json.loads(r.read().decode("utf-8"))
+    return (rows[0].get("data") or {}) if rows else {}
+try:
+    prev = sb_get_current()
+except Exception as e:
+    prev = None
+    print("could not read current Supabase data:", e)
+
+# Weekly box scores: every rostered player's lineup slot, actual and projected points per week.
+# Powers bench points, pickup value, win probability and the win calculator on the site.
+# Finalized weeks are reused from the last write; the current and previous week are re-pulled
+# every run (live scoring + stat corrections).
+weekly, players, match_proj = {}, {}, {}
+prev_weekly = (prev or {}).get("weekly") or {}
+final_weeks = {w for w in {m["week"] for m in schedule} if all(x["winner"] != "UNDECIDED" for x in schedule if x["week"] == w)}
+for w in range(1, (cur or 0) + 1):
+    if str(w) in prev_weekly and w in final_weeks and w < (cur or 0) - 1:
+        weekly[str(w)] = prev_weekly[str(w)]
+        continue
+    try:
+        bx = fetch_json(LEAGUE_BASE + f"?view=mMatchupScore&view=mBoxscore&scoringPeriodId={w}",
+            {"User-Agent": "Mozilla/5.0", "X-Fantasy-Filter": json.dumps({"schedule": {"filterMatchupPeriodIds": {"value": [w]}}})})
+        wk = {}
+        for m in bx.get("schedule", []):
+            for side in ("home", "away"):
+                sd = m.get(side) or {}
+                if sd.get("teamId") is None: continue
+                proj_live = sd.get("totalProjectedPointsLive", sd.get("totalProjectedPoints"))
+                if proj_live is not None:
+                    match_proj[(m["id"], side)] = round(proj_live, 2)
+                rows = []
+                for e in ((sd.get("rosterForCurrentScoringPeriod") or {}).get("entries") or []):
+                    pe = e.get("playerPoolEntry") or {}
+                    pl = pe.get("player") or {}
+                    pid = e.get("playerId")
+                    proj = 0
+                    for st in pl.get("stats", []):
+                        if st.get("scoringPeriodId") == w and st.get("statSourceId") == 1:
+                            proj = st.get("appliedTotal", 0) or 0
+                    rows.append([pid, e.get("lineupSlotId"), round(pe.get("appliedStatTotal", 0) or 0, 2), round(proj, 1)])
+                    if pid is not None and str(pid) not in players:
+                        info = resolve(pid) if pid in pmap or str(pid) in CACHE else {"name": pl.get("fullName"), "pos": POS.get(pl.get("defaultPositionId"), '?'), "proTeam": PRO.get(pl.get("proTeamId"), '?')}
+                        if not info.get("name"): info = resolve(pid)
+                        players[str(pid)] = [info["name"], info["pos"], info["proTeam"]]
+                wk[str(sd["teamId"])] = rows
+        weekly[str(w)] = wk
+    except Exception as e:
+        warn(f"week {w} box score fetch failed: {e}")
+        if str(w) in prev_weekly: weekly[str(w)] = prev_weekly[str(w)]
+# players referenced by reused weeks
+for p in ((prev or {}).get("players") or {}).items():
+    players.setdefault(p[0], p[1])
+# weeks reused above keep the projections saved with them last time
+for m in ((prev or {}).get("schedule") or []):
+    for side in ("home", "away"):
+        if m.get(side + "Proj") is not None:
+            match_proj.setdefault((m["id"], side), m[side + "Proj"])
+for m in schedule:
+    hp, ap = match_proj.get((m["id"], "home")), match_proj.get((m["id"], "away"))
+    if hp is not None: m["homeProj"] = hp
+    if ap is not None: m["awayProj"] = ap
 
 hist = json.load(open(HERE + "/history.json", encoding="utf-8"))
 finals = any(m["winner"] != "UNDECIDED" for m in schedule)
@@ -129,7 +206,7 @@ liveWeek = None
 for m in schedule:
     if m["week"] == cur and m["winner"] == "UNDECIDED" and (m["homeLive"] > 0 or m["awayLive"] > 0):
         liveWeek = cur; break
-out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab}
+out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players}
 
 # Only write when something actually changed (ignoring the timestamp itself), so an open
 # page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
@@ -140,19 +217,14 @@ def _sig(obj):
     return json.dumps(o, sort_keys=True)
 
 changed = True
-try:
-    greq = urllib.request.Request(SB_URL + "/rest/v1/league_data?id=eq.current&select=data",
-        headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY})
-    with urllib.request.urlopen(greq, timeout=90) as r:
-        rows = json.loads(r.read().decode("utf-8"))
-    if rows and _sig(rows[0].get("data", {})) == _sig(out):
-        changed = False
-        # keep the prior timestamp so "Updated X" reflects the last REAL change, not this poll
-        prev = (rows[0].get("data") or {}).get("meta", {}).get("lastUpdated")
-        if prev:
-            out["meta"]["lastUpdated"] = prev
-except Exception as e:
-    print("change-check failed, writing anyway:", e)
+if prev and _sig(prev) == _sig(out):
+    changed = False
+    # keep the prior timestamp so "Updated X" reflects the last REAL change, not this poll
+    prev_ts = prev.get("meta", {}).get("lastUpdated")
+    if prev_ts:
+        out["meta"]["lastUpdated"] = prev_ts
+elif prev is None:
+    print("change-check skipped (could not read Supabase), writing anyway")
 
 if not changed:
     print("No change since last pull — skipped write. | week:", cur, "| liveWeek:", liveWeek)
