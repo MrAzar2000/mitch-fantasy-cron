@@ -219,13 +219,31 @@ for m in schedule:
     if hp is not None: m["homeProj"] = hp
     if ap is not None: m["awayProj"] = ap
 
+# Stat corrections: a player's points changing in a week that was already final on the last run.
+# Kept as a running log (newest last, capped) for the site's Stat Corrections page.
+corrections = list((prev or {}).get("corrections") or [])
+_prev_sched = (prev or {}).get("schedule") or []
+_prev_final = {w for w in {m["week"] for m in _prev_sched} if all(x.get("winner") != "UNDECIDED" for x in _prev_sched if x["week"] == w)}
+_now_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+for w in sorted(final_weeks & _prev_final):
+    old_wk, new_wk = prev_weekly.get(str(w)) or {}, weekly.get(str(w)) or {}
+    for tid, rows in new_wk.items():
+        old = {r[0]: r for r in old_wk.get(tid, [])}
+        for r in rows:
+            o = old.get(r[0])
+            if o and abs((o[2] or 0) - (r[2] or 0)) >= 0.05:
+                info = players.get(str(r[0])) or ["Player %s" % r[0], "?", "?"]
+                corrections.append({"ts": _now_ms, "week": w, "tid": int(tid), "pid": r[0], "name": info[0], "pos": info[1],
+                                    "old": o[2], "new": r[2], "starter": r[1] not in (20, 21)})
+corrections = corrections[-500:]
+
 hist = json.load(open(HERE + "/history.json", encoding="utf-8"))
 finals = any(m["winner"] != "UNDECIDED" for m in schedule)
 liveWeek = None
 for m in schedule:
     if m["week"] == cur and m["winner"] == "UNDECIDED" and (m["homeLive"] > 0 or m["awayLive"] > 0):
         liveWeek = cur; break
-out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players}
+out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players, "corrections": corrections}
 
 # Only write when something actually changed (ignoring the timestamp itself), so an open
 # page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
@@ -253,3 +271,13 @@ else:
         headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal"})
     with urllib.request.urlopen(req, timeout=90) as r:
         print("Supabase upsert:", r.status, "| week:", cur, "| liveWeek:", liveWeek, "| finals:", finals, "| teams:", len(teams))
+
+# Heartbeat: a tiny separate row written every run, so the site can show "checked 1 min ago"
+# even when nothing changed (the league row above is only written on real changes).
+try:
+    hb = json.dumps({"id": "heartbeat", "data": {"checked": datetime.datetime.now(datetime.timezone.utc).isoformat()}}).encode("utf-8")
+    req = urllib.request.Request(SB_URL + "/rest/v1/league_data?on_conflict=id", data=hb, method="POST",
+        headers={"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal"})
+    urllib.request.urlopen(req, timeout=30).close()
+except Exception as e:
+    warn(f"heartbeat write failed: {e}")
