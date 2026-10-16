@@ -117,11 +117,13 @@ faab = {"budget": faab_budget, "usingFaab": acq.get('isUsingAcquisitionBudget', 
 
 # NFL kickoff times (epoch ms) for the site's "next kickoff" countdown. Best-effort: the
 # site falls back to standard TNF/Sunday/MNF slots if this is missing.
-nfl_kickoffs, pro_games = [], {}
+nfl_kickoffs, pro_games, bye_weeks = [], {}, {}
 try:
     pro = fetch_json(f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{SEASON}?view=proTeamSchedules_wl")
     seen = set()
     for pt in (pro.get("settings") or {}).get("proTeams", []):
+        b = pt.get("byeWeek")
+        if b: bye_weeks[PRO.get(pt.get("id"), str(pt.get("id")))] = b
         wk_games = (pt.get("proGamesByScoringPeriod") or {}).get(str(cur)) or []
         if wk_games and wk_games[0].get("date"):
             pro_games[PRO.get(pt.get("id"), str(pt.get("id")))] = int(wk_games[0]["date"])
@@ -243,7 +245,7 @@ liveWeek = None
 for m in schedule:
     if m["week"] == cur and m["winner"] == "UNDECIDED" and (m["homeLive"] > 0 or m["awayLive"] > 0):
         liveWeek = cur; break
-out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players, "corrections": corrections}
+out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games, "byeWeeks": bye_weeks}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players, "corrections": corrections}
 
 # Only write when something actually changed (ignoring the timestamp itself), so an open
 # page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
