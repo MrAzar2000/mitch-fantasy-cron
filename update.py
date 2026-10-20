@@ -245,7 +245,33 @@ liveWeek = None
 for m in schedule:
     if m["week"] == cur and m["winner"] == "UNDECIDED" and (m["homeLive"] > 0 or m["awayLive"] > 0):
         liveWeek = cur; break
-out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games, "byeWeeks": bye_weeks}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players, "corrections": corrections}
+# Win-probability swing history: live-score samples per current-week matchup, powering the
+# site's in-game win% graph. Appends a point only when a live score actually moves (so writes
+# stay sparse) and only for the current week (the graph reads the current week). [ts, hLive,
+# aLive, hProj, aProj]; the site reconstructs each point's win% with its own model. Best-effort:
+# the site just hides the graph if this is missing, so never let it break the pipeline.
+wp_hist = {}
+try:
+    prev_wph = (prev or {}).get("wpHistory") or {}
+    for m in schedule:
+        if m["week"] != cur or m.get("winner") != "UNDECIDED":
+            continue
+        hp, ap = m.get("homeProj"), m.get("awayProj")
+        if hp is None or ap is None:
+            continue
+        arr = list(prev_wph.get(str(m["id"])) or [])
+        hl, al = m.get("homeLive", 0) or 0, m.get("awayLive", 0) or 0
+        if hl <= 0 and al <= 0:
+            if arr:
+                wp_hist[str(m["id"])] = arr
+            continue
+        last = arr[-1] if arr else None
+        if (not last) or round(last[1], 1) != round(hl, 1) or round(last[2], 1) != round(al, 1):
+            arr.append([_now_ms, round(hl, 2), round(al, 2), round(hp, 2), round(ap, 2)])
+        wp_hist[str(m["id"])] = arr[-240:]
+except Exception as e:
+    warn(f"win-prob history failed: {e}")
+out = {"meta": {"leagueId": d["id"], "leagueName": d['settings']['name'], "season": d["seasonId"], "size": d['settings']['size'], "scoringType": d['settings']['scoringSettings'].get("scoringType"), "ppr": 0.5, "regularSeasonWeeks": d['settings']['scheduleSettings'].get("matchupPeriodCount"), "playoffTeamCount": d['settings']['scheduleSettings'].get("playoffTeamCount"), "currentScoringPeriod": cur, "liveWeek": liveWeek, "divisions": [{"id": dv.get("id"), "name": dv.get("name")} for dv in d['settings'].get("scheduleSettings", {}).get("divisions", [])], "lastUpdated": datetime.datetime.now(datetime.timezone.utc).isoformat(), "historySpan": [hist["seasons"][0]["year"], hist["seasons"][-1]["year"]], "nflKickoffs": nfl_kickoffs, "proGames": pro_games, "nflGames": nfl_games, "byeWeeks": bye_weeks}, "teams": teams, "scoring": scoring, "draft": draft, "schedule": schedule, "rosters": rosters, "records": records, "weeklyPlayed": finals, "history": hist, "faab": faab, "weekly": weekly, "players": players, "corrections": corrections, "wpHistory": wp_hist}
 
 # Only write when something actually changed (ignoring the timestamp itself), so an open
 # page doesn't "refresh" when nothing moved and we don't poke the DB pointlessly off-peak.
